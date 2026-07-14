@@ -56,8 +56,39 @@ export class ToolsManager {
     // LIST-API-ENDPOINTS
     dynamicTools.set("LIST-API-ENDPOINTS", {
       name: "list-api-endpoints",
-      description: "List all available API endpoints",
-      inputSchema: { type: "object", properties: {} },
+      description:
+        "List available API endpoints. Without filters, returns all endpoints. Use filters to narrow results for large APIs.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          search: {
+            type: "string",
+            description:
+              "Search in path, summary, description, and operationId (case-insensitive)",
+          },
+          tag: {
+            type: "string",
+            description: "Filter by OpenAPI tag (case-insensitive)",
+          },
+          method: {
+            type: "string",
+            description: "Filter by HTTP method",
+            enum: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+          },
+          pathPrefix: {
+            type: "string",
+            description: "Filter by path prefix (e.g. /api/cash)",
+          },
+          offset: {
+            type: "number",
+            description: "Skip N results for pagination (default 0)",
+          },
+          limit: {
+            type: "number",
+            description: "Max results to return (default 100)",
+          },
+        },
+      },
     })
 
     // GET-API-ENDPOINT-SCHEMA

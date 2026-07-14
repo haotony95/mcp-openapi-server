@@ -129,7 +129,7 @@ export class OpenAPIServer {
       return undefined
     }
 
-    this.logger.error(`Executing extra tool: ${extraTool.id} (${extraTool.tool.name})`)
+    this.logger.info(`Executing extra tool: ${extraTool.id} (${extraTool.tool.name})`)
 
     try {
       return await extraTool.handler(params)
@@ -239,37 +239,35 @@ export class OpenAPIServer {
 
     // Handle tool execution
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
-      const { id, name, arguments: params } = request.params
+      const { name, arguments: params } = request.params
 
-      this.logger.error("Received request:", request.params)
-      this.logger.error("Using parameters from arguments:", params)
+      this.logger.debug("Received request:", request.params)
+      this.logger.debug("Using parameters from arguments:", params)
 
-      // Find tool by ID or name
-      const idOrName = typeof id === "string" ? id : typeof name === "string" ? name : ""
-      if (!idOrName) {
-        throw new Error("Tool ID or name is required")
+      if (!name) {
+        throw new Error("Tool name is required")
       }
 
       const extraToolResult = await this.executeExtraTool(
-        idOrName,
+        name,
         (params || {}) as Record<string, unknown>,
       )
       if (extraToolResult) {
         return extraToolResult
       }
 
-      const toolInfo = this.toolsManager.findTool(idOrName)
+      const toolInfo = this.toolsManager.findTool(name)
       if (!toolInfo) {
         this.logger.error(
           `Available tools: ${Array.from(this.getAllTools())
             .map((t) => t.name)
             .join(", ")}`,
         )
-        throw new Error(`Tool not found: ${idOrName}`)
+        throw new Error(`Tool not found: ${name}`)
       }
 
       const { toolId, tool } = toolInfo
-      this.logger.error(`Executing tool: ${toolId} (${tool.name})`)
+      this.logger.info(`Executing tool: ${toolId} (${tool.name})`)
 
       try {
         // Execute the API call

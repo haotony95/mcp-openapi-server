@@ -11,7 +11,7 @@
     "url": "https://github.com/ivo-toby/mcp-openapi-server"
   },
   "bin": {
-    "openapi-mcp-server": "./bin/mcp-server.js"
+    "mcp-openapi-server": "./bin/mcp-server.js"
   },
   "files": [
     "dist",

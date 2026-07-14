@@ -6,6 +6,7 @@ import { parseToolId as parseToolIdUtil, generateToolId } from "./utils/tool-id.
 import { isValidHttpMethod, isGetLikeMethod, VALID_HTTP_METHODS } from "./utils/http-methods.js"
 import { OpenAPISpecLoader } from "./openapi-loader.js"
 import { OpenAPIV3 } from "openapi-types"
+import { Logger } from "./utils/logger.js"
 
 /**
  * System-controlled HTTP headers that should NEVER be set via user parameters
@@ -35,6 +36,7 @@ export class ApiClient {
   private specLoader?: OpenAPISpecLoader
   private openApiSpec?: OpenAPIV3.Document
   private excludeTagsLower: string[]
+  private logger: Logger
 
   /**
    * Create a new API client
@@ -75,6 +77,7 @@ export class ApiClient {
 
     this.specLoader = specLoader
     this.excludeTagsLower = options?.excludeTags?.map((tag) => tag.toLowerCase()) || []
+    this.logger = new Logger()
   }
 
   private operationHasExcludedTag(operation: unknown): boolean {
@@ -145,6 +148,41 @@ export class ApiClient {
     return resolvedRequestBody
   }
 
+  /**
+   * Deep-resolve all $ref pointers within a requestBody object so that
+   * get-api-endpoint-schema returns fully inlined field definitions.
+   */
+  private resolveRequestBodyRefs(
+    requestBody: any,
+    schemas: Record<string, OpenAPIV3.SchemaObject | OpenAPIV3.ReferenceObject>,
+  ): any {
+    // First resolve top-level requestBody $ref (e.g. $ref: #/components/requestBodies/...)
+    let resolved = requestBody
+    if ("$ref" in resolved) {
+      const obj = this.resolveRequestBodyObject(resolved)
+      if (obj) {
+        resolved = obj
+      } else {
+        return requestBody
+      }
+    }
+
+    // Deep-clone to avoid mutating the original spec
+    resolved = JSON.parse(JSON.stringify(resolved))
+
+    // Resolve schema $refs within each content type
+    if (resolved.content) {
+      for (const contentType of Object.keys(resolved.content)) {
+        const mediaType = resolved.content[contentType]
+        if (mediaType?.schema && this.specLoader) {
+          mediaType.schema = this.specLoader.inlineSchema(mediaType.schema, schemas, new Set())
+        }
+      }
+    }
+
+    return resolved
+  }
+
   private getRequestContentType(method: string, path: string): string | undefined {
     const pathItem = this.openApiSpec?.paths[path]
     const normalizedMethod = method.toLowerCase()
@@ -203,7 +241,7 @@ export class ApiClient {
     try {
       // Handle dynamic meta-tools that don't follow the standard HTTP method::path format
       if (toolId === "LIST-API-ENDPOINTS") {
-        return await this.handleListApiEndpoints()
+        return await this.handleListApiEndpoints(params)
       }
 
       if (toolId === "GET-API-ENDPOINT-SCHEMA") {
@@ -370,12 +408,15 @@ export class ApiClient {
       }
 
       // Execute the request
+      this.logger.info(`${config.method.toUpperCase()} ${config.url}`)
       const response = await this.axiosInstance(config)
+      this.logger.info(`${config.method.toUpperCase()} ${config.url} -> ${response.status}`)
       return response.data
     } catch (error) {
       // Handle errors
       if (axios.isAxiosError(error)) {
         const axiosError = error as AxiosError
+        this.logger.warn(`${toolId} -> ${axiosError.response?.status ?? 'NETWORK_ERROR'}: ${axiosError.message}`)
 
         // Check if it's an authentication error and we haven't already retried
         if (!isRetry && isAuthError(axiosError)) {
@@ -463,9 +504,13 @@ export class ApiClient {
   /**
    * Handle the LIST-API-ENDPOINTS meta-tool
    * Returns a list of all available API endpoints from the loaded tools
+   * Supports optional filtering by search, tag, method, pathPrefix, and pagination via offset/limit
    */
-  private async handleListApiEndpoints(): Promise<any> {
-    const endpoints: any[] = []
+  private async handleListApiEndpoints(
+    params: Record<string, any> = {},
+  ): Promise<any> {
+    this.logger.info("list-api-endpoints", JSON.stringify(params))
+    let endpoints: any[] = []
 
     // If we have the OpenAPI spec, use it to get all available endpoints
     if (this.openApiSpec) {
@@ -523,12 +568,67 @@ export class ApiClient {
       }
     }
 
+    const totalUnfiltered = endpoints.length
+
+    // Apply filters
+    if (params.method) {
+      const m = params.method.toUpperCase()
+      endpoints = endpoints.filter((e) => e.method === m)
+    }
+
+    if (params.tag) {
+      const t = params.tag.toLowerCase()
+      endpoints = endpoints.filter(
+        (e) =>
+          Array.isArray(e.tags) &&
+          e.tags.some((tag: string) => tag.toLowerCase() === t),
+      )
+    }
+
+    if (params.pathPrefix) {
+      const prefix = params.pathPrefix.toLowerCase()
+      endpoints = endpoints.filter((e) =>
+        e.path.toLowerCase().startsWith(prefix),
+      )
+    }
+
+    if (params.search) {
+      const terms = params.search.toLowerCase().split(/\s+/)
+      endpoints = endpoints.filter((e) => {
+        const haystack = [
+          e.path,
+          e.summary,
+          e.description,
+          e.operationId,
+          ...(e.tags || []),
+        ]
+          .join(" ")
+          .toLowerCase()
+        return terms.every((term: string) => haystack.includes(term))
+      })
+    }
+
+    const filteredTotal = endpoints.length
+
+    // Apply pagination
+    const offset = params.offset ?? 0
+    const limit = params.limit ?? 100
+    endpoints = endpoints.slice(offset, offset + limit)
+
+    const hasFilters =
+      params.search || params.tag || params.method || params.pathPrefix
+
     return {
       endpoints,
-      total: endpoints.length,
-      note: this.openApiSpec
-        ? "Use INVOKE-API-ENDPOINT to call specific endpoints with the path parameter"
-        : "Limited endpoint information - OpenAPI spec not available",
+      returned: endpoints.length,
+      filtered: filteredTotal,
+      total: totalUnfiltered,
+      ...(filteredTotal > offset + limit
+        ? { next_offset: offset + limit }
+        : {}),
+      note: hasFilters
+        ? `Showing ${endpoints.length} of ${filteredTotal} matching endpoints (${totalUnfiltered} total). Use offset/limit to paginate.`
+        : `Showing ${endpoints.length} of ${totalUnfiltered} total endpoints. Use search, tag, method, or pathPrefix to filter.`,
     }
   }
 
@@ -538,6 +638,7 @@ export class ApiClient {
    */
   private handleGetApiEndpointSchema(toolId: string, params: Record<string, any>): any {
     const { endpoint } = params
+    this.logger.info("get-api-endpoint-schema", endpoint)
 
     if (!endpoint) {
       throw new Error(`Missing required parameter 'endpoint' for tool '${toolId}'`)
@@ -564,13 +665,19 @@ export class ApiClient {
           continue
         }
 
+        // Resolve $ref in requestBody schema so callers see actual field definitions
+        let resolvedRequestBody = op.requestBody || null
+        if (resolvedRequestBody && this.specLoader && this.openApiSpec?.components?.schemas) {
+          resolvedRequestBody = this.resolveRequestBodyRefs(resolvedRequestBody, this.openApiSpec.components.schemas)
+        }
+
         operations.push({
           method: method.toUpperCase(),
           operationId: op.operationId || "",
           summary: op.summary || "",
           description: op.description || "",
           parameters: op.parameters || [],
-          requestBody: op.requestBody || null,
+          requestBody: resolvedRequestBody || op.requestBody || null,
           responses: op.responses || {},
           tags: op.tags || [],
         })
@@ -624,6 +731,7 @@ export class ApiClient {
    */
   private async handleInvokeApiEndpoint(toolId: string, params: Record<string, any>): Promise<any> {
     const { endpoint, method, params: endpointParams = {} } = params
+    this.logger.info("invoke-api-endpoint", method || "AUTO", endpoint)
 
     if (!endpoint) {
       throw new Error(`Missing required parameter 'endpoint' for tool '${toolId}'`)
@@ -713,11 +821,14 @@ export class ApiClient {
 
     try {
       // Execute the request
+      this.logger.info(`${method} ${path}`)
       const response = await this.axiosInstance.request(config)
+      this.logger.info(`${method} ${path} -> ${response.status}`)
       return response.data
     } catch (error) {
       if (axios.isAxiosError(error)) {
         const axiosError = error as AxiosError
+        this.logger.warn(`${method} ${path} -> ${axiosError.response?.status ?? 'NETWORK_ERROR'}: ${axiosError.message}`)
         throw new Error(
           `API request failed: ${axiosError.message}${
             axiosError.response

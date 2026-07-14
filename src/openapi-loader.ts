@@ -171,7 +171,7 @@ export class OpenAPISpecLoader {
   /**
    * Inline `$ref` schemas from components and drop recursive cycles
    */
-  private inlineSchema(
+  public inlineSchema(
     schema: OpenAPIV3.SchemaObject | OpenAPIV3.ReferenceObject,
     components: Record<string, OpenAPIV3.SchemaObject | OpenAPIV3.ReferenceObject> | undefined,
     visited: Set<string>,
